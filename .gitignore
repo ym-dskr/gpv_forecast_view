@@ -1,0 +1,19 @@
+# Python バイトコード
+__pycache__/
+*.py[cod]
+
+# Jupyter Notebook のチェックポイント
+.ipynb_checkpoints/
+
+# データ・出力ディレクトリ
+data/
+output/
+
+# VSCode の設定ファイル
+.vscode/
+
+# macOS の不要ファイル
+.DS_Store
+
+# 環境設定ファイル
+.env
