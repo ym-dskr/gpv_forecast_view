@@ -9,6 +9,7 @@ import os
 import glob
 import gc
 import time
+import json
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 import numpy as np
@@ -39,27 +40,29 @@ STYLE_CONFIG = {
 }
 
 def create_custom_colormaps():
-    """Create premium custom colormaps"""
-    # Precipitation: Transparent -> Blue -> Purple -> Red
+    """Create standard weather forecast colormaps"""
+    # Precipitation: JMA-style (Transparent -> Blue -> Yellow -> Red -> Purple)
     precip_colors = [
-        (0.0, (0, 0, 0, 0)),
-        (0.05, '#00aaff'),
-        (0.2, '#0044ff'),
-        (0.5, '#aa00ff'),
-        (1.0, '#ff0000')
+        (0.0, (1, 1, 1, 0)),      # Transparent for 0
+        (0.02, '#c0e0ff'),        # Very Light Blue
+        (0.1, '#4080ff'),         # Blue
+        (0.3, '#40ff40'),         # Green
+        (0.5, '#ffff40'),         # Yellow
+        (0.7, '#ff8040'),         # Orange
+        (0.85, '#ff4040'),        # Red
+        (1.0, '#ff40ff')          # Magenta/Purple
     ]
-    precip_cmap = LinearSegmentedColormap.from_list('modern_precip', precip_colors)
+    precip_cmap = LinearSegmentedColormap.from_list('weather_precip', precip_colors)
 
-    # Wind: Dark -> Blue -> Cyan -> Yellow -> Magenta
+    # Wind: Standard Blue -> Green -> Yellow -> Red
     wind_colors = [
-        (0.0, '#1a1a2e'),
-        (0.2, '#16213e'),
-        (0.4, '#0f3460'),
-        (0.6, '#533483'),
-        (0.8, '#e94560'),
-        (1.0, '#fffb00')
+        (0.0, '#4040ff'),         # Blue (Calm)
+        (0.3, '#40ff40'),         # Green
+        (0.6, '#ffff40'),         # Yellow
+        (0.85, '#ff8040'),        # Orange
+        (1.0, '#ff4040')          # Red (Strong)
     ]
-    wind_cmap = LinearSegmentedColormap.from_list('modern_wind', wind_colors)
+    wind_cmap = LinearSegmentedColormap.from_list('weather_wind', wind_colors)
     
     return {'Precipitation': precip_cmap, 'Wind Speed': wind_cmap}
 
@@ -70,36 +73,44 @@ def get_variable_config():
     return {
         'Temperature': {
             'source_names': ['t', '2t', 't2m'],
-            'cmap': 'magma',
+            'cmap': 'RdYlBu_r',  # Standard: Blue (Cold) -> Yellow -> Red (Hot)
             'vmin': -10, 'vmax': 35,
             'unit': '°C',
             'convert': lambda x: x - 273.15 if np.nanmean(x) > 200 else x
         },
         'Pressure': {
             'source_names': ['prmsl', 'msl', 'sp'],
-            'cmap': 'viridis',
+            'cmap': 'RdYlGn_r',  # Red (Low) -> Yellow -> Green (High)
             'vmin': 990, 'vmax': 1025,
             'unit': 'hPa',
             'convert': lambda x: x / 100.0 if np.nanmean(x) > 80000 else x
         },
         'Humidity': {
             'source_names': ['r', '2r', 'r2'],
-            'cmap': 'GnBu',
+            'cmap': 'YlGnBu',  # Yellow (Dry) -> Green -> Blue (Wet)
             'vmin': 40, 'vmax': 100,
             'unit': '%'
         },
         'Precipitation': {
             'source_names': ['precipitation', 'tp', 'apcp', 'unknown'],
             'cmap': CUSTOM_CMAPS['Precipitation'],
-            'vmin': 0.1, 'vmax': 50,
+            'vmin': 0.0, 'vmax': 50,
             'unit': 'mm/h',
-            'is_accum': True
+            'is_accum': True,
+            'required_stepType': 'accum'
         },
         'Wind Speed': {
             'source_names': ['wind_speed'],
             'cmap': CUSTOM_CMAPS['Wind Speed'],
             'vmin': 0, 'vmax': 25,
             'unit': 'm/s'
+        },
+        'Cloud Cover': {
+            'source_names': ['tcc', 'lcc', 'mcc', 'hcc'],
+            'cmap': 'Greys_r',  # Black (Clear) -> White (Cloudy)
+            'vmin': 0, 'vmax': 100,
+            'unit': '%',
+            'is_cloud': True  # Special flag for cloud combination logic
         }
     }
 
@@ -187,6 +198,18 @@ def render_frame_task(task_data):
         plt.tight_layout()
         plt.savefig(output_path, dpi=100, facecolor=STYLE_CONFIG['facecolor'], bbox_inches='tight')
         plt.close(fig)
+        
+        # Save metadata for this frame
+        metadata = {
+            'frame_index': frame_idx,
+            'valid_time': valid_time_str,
+            'variables': list(plot_data.keys()),
+            'image_path': os.path.basename(output_path)
+        }
+        
+        metadata_path = output_path.replace('.png', '_metadata.json')
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
         
         return output_path
         
@@ -296,7 +319,13 @@ def main():
                                             # Check if step exists
                                             if 'step' in ds.coords and step not in ds.step.values:
                                                 continue
-                                                
+                                            
+                                            # Check required stepType (e.g. accum for precip)
+                                            if 'required_stepType' in cfg:
+                                                var_step_type = ds[s_name].attrs.get('GRIB_stepType', '')
+                                                if var_step_type != cfg['required_stepType']:
+                                                    continue
+
                                             base_var = ds[s_name].sel(step=step)
                                             values = base_var.values.copy()
                                             found_ds = ds
@@ -306,6 +335,26 @@ def main():
                                             continue
                                 if found_ds:
                                     break
+                            
+                            # Special handling for Cloud Cover: combine lcc/mcc/hcc if tcc not found
+                            if not found_ds and cfg.get('is_cloud', False):
+                                cloud_layers = []
+                                for ds in datasets:
+                                    for cloud_var in ['lcc', 'mcc', 'hcc']:
+                                        if cloud_var in ds.data_vars:
+                                            try:
+                                                if 'step' in ds.coords and step in ds.step.values:
+                                                    cloud_data = ds[cloud_var].sel(step=step)
+                                                    cloud_layers.append(cloud_data.values)
+                                            except Exception:
+                                                pass
+                                
+                                if cloud_layers:
+                                    # Take maximum of all cloud layers
+                                    values = np.maximum.reduce(cloud_layers)
+                                    base_var = cloud_data  # Use last one for coordinates
+                                    found_ds = ds
+                                    found_var_name = 'cloud_combined'
                             
                             if not found_ds:
                                 continue
@@ -319,6 +368,9 @@ def main():
                                 # Fix negative values (reset or artifacts)
                                 diff[diff < 0] = 0
                                 values = diff
+                            else:
+                                # First step: plot zeros to maintain layout
+                                values = np.zeros_like(current_val)
                             
                             # Update previous
                             prev_accum_values[disp_name] = current_val
@@ -383,8 +435,68 @@ def main():
                 image = imageio.v2.imread(frame_path)
                 writer.append_data(image)
         print(f"Done! Saved to: {gif_path}")
+        
+        # Generate Interactive Viewer
+        print("\nGenerating interactive viewer...")
+        generate_interactive_viewer(generated_frames)
+        
+        # Generate Station Timeseries and Map Viewer
+        print("\nGenerating station timeseries and map viewer...")
+        try:
+            import subprocess
+            subprocess.run(["python", "station_timeseries.py"], check=True)
+            subprocess.run(["python", "generate_map_viewer.py"], check=True)
+        except Exception as e:
+            print(f"Note: Could not generate station analysis: {e}")
+            print("You can run 'python station_timeseries.py' and 'python generate_map_viewer.py' manually.")
     else:
         print("No frames generated.")
+
+def generate_interactive_viewer(frame_paths):
+    """Generate an interactive HTML viewer for the forecast frames"""
+    
+    # Collect metadata from all frames
+    frames_info = []
+    for frame_path in frame_paths:
+        metadata_path = frame_path.replace('.png', '_metadata.json')
+        if os.path.exists(metadata_path):
+            with open(metadata_path, 'r') as f:
+                metadata = json.load(f)
+                frames_info.append(metadata)
+    
+    if not frames_info:
+        print("No frame metadata found for interactive viewer.")
+        return
+    
+    # Load HTML template
+    template_path = os.path.join(os.path.dirname(__file__), "viewer_template.html")
+    if not os.path.exists(template_path):
+        print(f"Template file not found: {template_path}")
+        return
+    
+    with open(template_path, 'r', encoding='utf-8') as f:
+        html_template = f.read()
+    
+    # Prepare data for template
+    first_variables_html = ' '.join([f'<span class="variable-tag">{var}</span>' 
+                                      for var in frames_info[0]['variables']])
+    
+    # Replace placeholders
+    html_content = html_template.replace('{{FIRST_IMAGE}}', frames_info[0]['image_path'])
+    html_content = html_content.replace('{{FIRST_TIME}}', frames_info[0]['valid_time'])
+    html_content = html_content.replace('{{MAX_INDEX}}', str(len(frames_info) - 1))
+    html_content = html_content.replace('{{TOTAL_FRAMES}}', str(len(frames_info)))
+    html_content = html_content.replace('{{FIRST_VARIABLES}}', first_variables_html)
+    html_content = html_content.replace('{{FRAMES_DATA}}', json.dumps(frames_info, ensure_ascii=False))
+    
+    # Save HTML file
+    html_path = os.path.join(OUTPUT_DIR, "interactive_viewer.html")
+    with open(html_path, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    
+    print(f"Interactive viewer saved to: {html_path}")
+    print("Open this file in a web browser to view the interactive forecast.")
+
 
 if __name__ == "__main__":
     # Fix for Windows multiprocessing
