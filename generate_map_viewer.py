@@ -21,7 +21,33 @@ import json
 OUTPUT_DIR = "output"
 
 def generate_map_viewer():
-    """地図ビューアーHTMLを生成"""
+    """地図ビューアーHTMLを生成する。
+
+    station_data.jsonファイルを読み込み、インタラクティブな地図ビューアーHTMLを生成する。
+    テンプレートファイルを使用せず、スクリプト内でHTMLを直接構築することで、
+    依存関係を減らし、より堅牢な動作を実現する。
+
+    主な機能:
+        - station_data.jsonの読み込みと検証
+        - 全画面レイアウトのHTML地図生成
+        - Leaflet.jsとChart.jsの統合
+        - レスポンシブなダークテーマUI
+        - 気象データの時系列グラフ表示
+
+    Args:
+        なし
+
+    Returns:
+        なし
+
+    Raises:
+        FileNotFoundError: station_data.jsonが見つからない場合
+        IOError: HTMLファイルの保存に失敗した場合
+
+    Note:
+        出力HTMLファイルは output/html/map_viewer.html に保存される。
+        ブラウザで表示するには run_map_viewer.py を使用することを推奨。
+    """
     print("=== 地図ビューアー生成（再構築版） ===\n")
     
     # station_data.jsonを読み込む

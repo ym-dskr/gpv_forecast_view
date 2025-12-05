@@ -40,7 +40,21 @@ STYLE_CONFIG = {
 }
 
 def create_custom_colormaps():
-    """Create standard weather forecast colormaps"""
+    """標準的な気象予報用カラーマップを作成する。
+
+    気象データ可視化用の専用カラーマップを生成する。
+    降水量用にはJMA（気象庁）スタイルの透明→青→黄→赤→紫のグラデーション、
+    風速用には標準的な青→緑→黄→赤のグラデーションを提供する。
+
+    Returns:
+        dict[str, LinearSegmentedColormap]: カラーマップ辞書
+            'Precipitation': 降水量用カラーマップ（透明→青→黄→赤→紫）
+            'Wind Speed': 風速用カラーマップ（青→緑→黄→赤）
+
+    Note:
+        降水量カラーマップは0mm/hで透明、強い降水で紫色になるよう設計。
+        風速カラーマップは穏やかな風で青、強風で赤になるよう設計。
+    """
     # Precipitation: JMA-style (Transparent -> Blue -> Yellow -> Red -> Purple)
     precip_colors = [
         (0.0, (1, 1, 1, 0)),      # Transparent for 0
@@ -69,7 +83,28 @@ def create_custom_colormaps():
 CUSTOM_CMAPS = create_custom_colormaps()
 
 def get_variable_config():
-    """Get configuration for variables"""
+    """気象変数の設定情報を取得する。
+
+    各気象変数（気温、気圧、湿度、降水量、風速、雲量）に対する描画設定を
+    提供する。ソース変数名、カラーマップ、値域、単位、変換関数などを含む。
+
+    Returns:
+        dict[str, dict]: 変数設定辞書。各キーは表示名、値は以下を含む辞書:
+            source_names (list[str]): GRIBファイル内での変数名候補
+            cmap (str|LinearSegmentedColormap): カラーマップ
+            vmin (float): 最小表示値
+            vmax (float): 最大表示値
+            unit (str): 表示単位
+            convert (callable, optional): 単位変換関数
+            is_accum (bool, optional): 累積変数フラグ
+            required_stepType (str, optional): 必須ステップタイプ
+            is_cloud (bool, optional): 雲量変数フラグ
+
+    Note:
+        累積変数（降水量）は前ステップとの差分を計算。
+        雲量は複数層の最大値を使用。
+        温度・気圧は自動的に単位変換される。
+    """
     return {
         'Temperature': {
             'source_names': ['t', '2t', 't2m'],
@@ -115,9 +150,27 @@ def get_variable_config():
     }
 
 def render_frame_task(task_data):
-    """
-    Worker function to render a single frame.
-    Running in a separate process ensures memory is fully released on exit.
+    """単一フレームを描画するワーカー関数。
+
+    マルチプロセッシング環境で実行され、1つの予報フレームを生成する。
+    別プロセスで実行することで、Matplotlibのメモリリークを防ぎ、
+    大量のフレーム生成時の安定性を確保する。
+
+    Args:
+        task_data (tuple): フレーム描画に必要なデータのタプル
+            frame_idx (int): フレーム番号
+            plot_data (dict): 描画データ（変数名→データ辞書）
+            valid_time_str (str): 有効時刻文字列
+            output_path (str): 出力PNG画像パス
+
+    Returns:
+        str|None: 成功時は出力ファイルパス、失敗時はNone
+
+    Note:
+        - プロセス内でMatplotlib環境を独立設定
+        - 日本域の地図投影でCartopy使用
+        - ダークテーマの現代的なデザイン適用
+        - メタデータJSONファイルも併せて生成
     """
     try:
         frame_idx, plot_data, valid_time_str, output_path = task_data
@@ -220,6 +273,25 @@ def render_frame_task(task_data):
         return None
 
 def main():
+    """メインの可視化処理を実行する。
+
+    MSM GPVデータファイルを読み込み、マルチプロセッシングで気象予報図を生成する。
+    GIFアニメーション、インタラクティブビューアー、地図ビューアーも併せて作成。
+
+    処理フロー:
+        1. dataディレクトリからGRIBファイル検索
+        2. 各ファイルから気象変数データ抽出
+        3. マルチプロセッシングで並列フレーム生成
+        4. GIFアニメーション作成
+        5. インタラクティブHTMLビューアー生成
+        6. 官署データによる地図ビューアー生成
+
+    Note:
+        - CPU数-1のワーカープロセス使用
+        - メモリ効率のためプロセス当たり1タスク制限
+        - 累積降水量は前ステップとの差分計算
+        - エラー時も可能な限り処理継続
+    """
     print("=== Modern MSM Visualizer ===")
     print(f"Workers: {MAX_WORKERS}")
     
@@ -453,7 +525,20 @@ def main():
         print("No frames generated.")
 
 def generate_interactive_viewer(frame_paths):
-    """Generate an interactive HTML viewer for the forecast frames"""
+    """予報フレーム用のインタラクティブHTMLビューアーを生成する。
+
+    生成されたPNGフレーム群からWebブラウザで操作可能なビューアーを作成する。
+    ユーザーはスライダーやボタンでフレーム間を移動でき、時刻や変数情報も表示される。
+
+    Args:
+        frame_paths (list[str]): 生成されたPNGフレームのパス一覧
+
+    Note:
+        - viewer_template.htmlテンプレートが必要
+        - フレームメタデータJSONから時刻・変数情報取得
+        - 出力はoutput/interactive_viewer.htmlに保存
+        - JavaScriptによるクライアントサイド制御
+    """
     
     # Collect metadata from all frames
     frames_info = []
